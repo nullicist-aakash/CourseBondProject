@@ -12,12 +12,149 @@
 #include <cassert>
 #include <fstream>
 
-// ONE UNIT = 1 YEAR
-// YIELD = CONTINUOUS TIME YIELD
-using TIME_POINT = double;
-using AMOUNT = double;
+enum class RateType
+{
+    YEARLY,
+    CONTINUOUS
+};
 
-using PaymentSchedule = std::vector<std::pair<TIME_POINT, AMOUNT>>;
+struct Rate
+{
+private:
+    double cts_rate;
+
+    Rate(double rate, RateType type) : cts_rate(type == RateType::YEARLY ? std::log(1 + rate) : rate) {
+        if (rate > 1 || rate < 0)
+        {
+            std::cerr << "Rate should be between 0 and 1" << std::endl;
+            std::terminate();
+        }
+    }
+
+public:
+    static Rate make_continuous_rate(double rate) noexcept
+    {
+        return {rate, RateType::CONTINUOUS};
+    }
+
+    static Rate make_yearly_rate(double rate, int frequency) noexcept
+    {
+        return {std::pow(1 + rate / frequency, frequency) - 1, RateType::YEARLY};
+    }
+
+    [[nodiscard]] auto get_continuous_rate() const noexcept
+    {
+        return cts_rate;
+    }
+
+    [[nodiscard]] auto get_yearly_rate(int frequency = 1) const noexcept
+    {
+        if (frequency == 0)
+            return 0.0;
+
+        return frequency * (std::exp(cts_rate / frequency) - 1);
+    }
+
+    [[nodiscard]] auto get_interest(double amount, double time, RateType rate_type) const noexcept
+    {
+        if (time < 0)
+        {
+            std::cerr << "Time should be non-negative" << std::endl;
+            std::terminate();
+        }
+
+        if (rate_type == RateType::CONTINUOUS)
+            return amount * (std::exp(cts_rate * time) - 1);
+
+        if (int(time) != time and time > 1)
+        {
+            std::cerr << "Time should be an integer, or less than 1 for yearly rate. Passed: " << time << std::endl;
+            std::terminate();
+        }
+
+        const auto yearly_rate = get_yearly_rate(1);
+
+        if (time < 1)
+            return amount * yearly_rate * time;
+
+        return amount * std::pow(1 + yearly_rate, time) - amount;
+    }
+
+    [[nodiscard]] auto get_discount_factor(double time, RateType rate_type) const noexcept
+    {
+        return 1.0 / (1 + get_interest(1, time, rate_type));
+    }
+
+    [[nodiscard]] auto get_present_value(double amount, double time, RateType rate_type) const noexcept
+    {
+        return amount * get_discount_factor(time, rate_type);
+    }
+
+    [[nodiscard]] auto get_future_value(double amount, double time, RateType rateType) const noexcept
+    {
+        return amount / get_discount_factor(time, rateType);
+    }
+
+    [[nodiscard]] static bool test_rate_api() noexcept
+    {
+        if (std::abs(Rate(0.05, RateType::CONTINUOUS).get_continuous_rate() - 0.05) > 1e-6)
+        {
+            std::cerr << "Continuous rate fetch failed" << std::endl;
+            return false;
+        }
+
+        const auto rate = Rate(0.05, RateType::YEARLY);
+        if (std::abs(rate.get_yearly_rate(1) - 0.05) > 1e-6)
+        {
+            std::cerr << "Yearly rate fetch failed" << std::endl;
+            return false;
+        }
+
+        if (std::abs(rate.get_interest(100, 1, RateType::CONTINUOUS) - 5) > 1e-6)
+        {
+            std::cerr << "Continuous interest calculation failed" << std::endl;
+            return false;
+        }
+
+        if (std::abs(rate.get_interest(100, 1, RateType::YEARLY) - 5) > 1e-6)
+        {
+            std::cerr << "Yearly interest calculation failed" << std::endl;
+            return false;
+        }
+
+        if (std::abs(rate.get_interest(100, 0.5, RateType::YEARLY) - 2.5) > 1e-6)
+        {
+            std::cerr << "Yearly interest calculation failed for non-integer time" << std::endl;
+            return false;
+        }
+
+        if (std::abs(rate.get_interest(100, 0.5, RateType::CONTINUOUS) - 2.4695076) > 1e-6)
+        {
+            std::cerr << "Yearly interest calculation failed for non-integer time" << std::endl;
+            return false;
+        }
+
+        if (std::abs(rate.get_discount_factor(1, RateType::YEARLY) - 0.95238095238) > 1e-6)
+        {
+            std::cerr << "Yearly discount factor calculation failed" << std::endl;
+            return false;
+        }
+
+        if (std::abs(rate.get_discount_factor(2, RateType::YEARLY) - 0.90702947845) > 1e-6)
+        {
+            std::cerr << "Yearly discount factor calculation failed" << std::endl;
+            return false;
+        }
+
+        if (std::abs(rate.get_discount_factor(2, RateType::CONTINUOUS) - 0.90702947845) > 1e-6)
+        {
+            std::cerr << "Yearly discount factor calculation failed" << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+};
 
 enum class DayCountConvention
 {
@@ -25,55 +162,98 @@ enum class DayCountConvention
     ACTUAL_ACTUAL
 };
 
-struct Bond
+/**
+* Finds the date difference in years w.r.t. day convention.
+* @param d1 First date.
+* @param d2 Second date.
+* @return Result is positive iff d1 <= d2.
+*/
+[[nodiscard]] auto get_time_diff(DayCountConvention convention, int d1, int d2)
 {
-    Bond(double principal, double coupon, double frequency, double n_years, int start_date, DayCountConvention convention)
-        : start_date(start_date), convention(convention)
+    const int sign = d1 > d2 ? -1 : 1;
+    if (sign == -1)
+        std::swap(d1, d2);
+
+    std::tm t1{}, t2{};
+    t1.tm_year = (d1 / 10000) - 1900;
+    t1.tm_mon = (d1 % 10000) / 100 - 1;
+    t1.tm_mday = d1 % 100;
+
+    t2.tm_year = (d2 / 10000) - 1900;
+    t2.tm_mon = (d2 % 10000) / 100 - 1;
+    t2.tm_mday = d2 % 100;
+
+    if (convention == DayCountConvention::_30_360)
     {
-        assert(frequency > 0);
-        assert(n_years >= 0);
-        for (int i = 1; i <= n_years * frequency; ++i)
-            schedule.emplace_back(i / frequency, coupon / frequency);
-        schedule.back().second += principal;
+        if (t2.tm_mday == 31 and (t1.tm_mday >= 30))
+            t2.tm_mday = 30;
+        if (t1.tm_mday == 31)
+            t1.tm_mday = 30;
+        return sign * ((t2.tm_year - t1.tm_year) * 360 + (t2.tm_mon - t1.tm_mon) * 30 + (t2.tm_mday - t1.tm_mday)) / 360.0;
     }
 
-    [[nodiscard]] auto get_dirty_price_at_point(double point, double cts_yield) const noexcept
+    if (convention == DayCountConvention::ACTUAL_ACTUAL)
     {
-        if (point >= schedule.back().first)
+        const auto t1_seconds = std::mktime(&t1);
+        const auto t2_seconds = std::mktime(&t2);
+        return sign * std::abs(std::difftime(t2_seconds, t1_seconds) / (60 * 60 * 24 * 365.0));
+    }
+
+    std::cerr << "Unknown day count convention" << std::endl;
+    std::terminate();
+}
+
+class Bond
+{
+public:
+    double principal;
+    double yearly_coupon;
+    double n_years;
+    int start_date;
+    int frequency;
+    DayCountConvention convention;
+
+    [[nodiscard]] auto get_price(int date, Rate yield) const noexcept
+    {
+        if (int(n_years * frequency) != n_years * frequency)
+        {
+            std::cerr << "Bond should have integer number of payments" << std::endl;
+            std::terminate();
+        }
+
+        const auto point = get_time_diff(convention, start_date, date);
+        const auto interval_start = std::floor(point * frequency) / (double)frequency;
+        const auto interval_end = interval_start + 1 / (double)frequency;
+        if (point < 0 or point >= n_years)
         {
             std::cerr << "Can't find bond price when it is already matured!";
             std::terminate();
         }
 
-        const auto new_schedule = get_schedule_on_point(point);
-        return std::accumulate(new_schedule.begin(), new_schedule.end(), 0.0, [cts_yield](double sum, auto const& p) {
-            return sum + p.second * std::exp(-cts_yield * p.first);
-        });
+        struct
+        {
+            double clean_price = 0;
+            double dirty_price = 0;
+        } price;
+
+        price.dirty_price = 0.0;
+        for (int i = (int)std::floor(point * frequency) + 1; i <= n_years * frequency; ++i)
+            price.dirty_price += yield.get_present_value(
+                    yearly_coupon / frequency,
+                    i / (double)frequency - interval_end,
+                    RateType::CONTINUOUS);
+        price.dirty_price += yield.get_present_value(principal, n_years - interval_end, RateType::CONTINUOUS);
+
+        const auto lhs_rate = Rate::make_yearly_rate(yearly_coupon / principal, 1);
+        price.dirty_price = yield.get_present_value(price.dirty_price, interval_end - point, RateType::CONTINUOUS);
+        price.clean_price = price.dirty_price - lhs_rate.get_interest(principal, point - interval_start, RateType::YEARLY);
+        return price;
     }
 
-    [[nodiscard]] auto get_clean_price_at_point(double point, double cts_yield) const noexcept
+    [[nodiscard]] auto get_yield(int date, double clean_price) const noexcept
     {
-        const auto dirty_price = get_dirty_price_at_point(point, cts_yield);
-        const auto last_payment_point = std::find_if(schedule.rbegin(), schedule.rend(), [&](auto const& p) { return p.first <= point; });
-        const auto start_point = (last_payment_point == schedule.rend()) ? 0 : last_payment_point->first;
-        const auto interest = schedule[0].second * (point - start_point) / (schedule[1].first - schedule[0].first);
-        return dirty_price - interest;
-    }
-
-    [[nodiscard]] auto get_dirty_price(int date, double cts_yield) const noexcept
-    {
-        return get_dirty_price_at_point(get_time_diff(start_date, date), cts_yield);
-    }
-
-    [[nodiscard]] auto get_clean_price(int date, double cts_yield) const noexcept
-    {
-        return get_clean_price_at_point(get_time_diff(start_date, date), cts_yield);
-    }
-
-    [[nodiscard]] auto get_cts_yield(int date, AMOUNT price) const noexcept
-    {
-        const auto payment_sum = std::accumulate(schedule.begin(), schedule.end(), 0.0, [](double sum, auto const& p) { return sum + p.second; });
-        if (payment_sum < price)
+        const auto payment_sum = principal + yearly_coupon * n_years;
+        if (payment_sum < clean_price)
         {
             std::cerr << "Price of bond can't be more than sum of payments. This implies negative yield which is not reasonable" << std::endl;
             std::terminate();
@@ -84,116 +264,45 @@ struct Bond
         while (std::abs(l - r) > 1e-6)
         {
             const double m = std::midpoint(l, r);
-            const double fetched_price = get_clean_price(date, m);
-            if (fetched_price >= price)
+            const double fetched_price = get_price(date, Rate::make_yearly_rate(m , 1)).clean_price;
+            if (fetched_price >= clean_price)
                 l = m;
             else
                 r = m;
         }
 
-        return l;
+        return Rate::make_yearly_rate(l, 1);
     }
-
-private:
-    /**
-     * Returns the schedule after removing all payments before the given date. Note that the payment on passed point is
-     * not included.
-     * @param point The time point where units are measured in years, w.r.t. start date of bond.
-     * @return The payment schedule, with timings reset to 0 w.r.t. passed point.
-     */
-    [[nodiscard]] PaymentSchedule get_schedule_on_point(double point) const noexcept
-    {
-        PaymentSchedule new_schedule;
-        std::copy_if(schedule.begin(), schedule.end(), std::back_inserter(new_schedule), [point](auto const& p) { return p.first > point; });
-        std::ranges::for_each(new_schedule, [point](auto& p) { p.first -= point; });
-        return new_schedule;
-    }
-
-    /**
-     * Finds the date difference in years w.r.t. day convention.
-     * @param d1 First date.
-     * @param d2 Second date.
-     * @return Result is positive iff d1 <= d2.
-     */
-    [[nodiscard]] auto get_time_diff(int d1, int d2) const noexcept -> double
-    {
-        const int sign = d1 > d2 ? -1 : 1;
-        if (sign == -1)
-            std::swap(d1, d2);
-
-        std::tm t1{}, t2{};
-        t1.tm_year = (d1 / 10000) - 1900;
-        t1.tm_mon = (d1 % 10000) / 100 - 1;
-        t1.tm_mday = d1 % 100;
-
-        t2.tm_year = (d2 / 10000) - 1900;
-        t2.tm_mon = (d2 % 10000) / 100 - 1;
-        t2.tm_mday = d2 % 100;
-
-        if (convention == DayCountConvention::_30_360)
-        {
-            if (t2.tm_mday == 31 and (t1.tm_mday >= 30))
-                t2.tm_mday = 30;
-            if (t1.tm_mday == 31)
-                t1.tm_mday = 30;
-            return sign * ((t2.tm_year - t1.tm_year) * 360 + (t2.tm_mon - t1.tm_mon) * 30 + (t2.tm_mday - t1.tm_mday)) / 360.0;
-        }
-
-        if (convention == DayCountConvention::ACTUAL_ACTUAL)
-        {
-            const auto t1_seconds = std::mktime(&t1);
-            const auto t2_seconds = std::mktime(&t2);
-            return sign * std::abs(std::difftime(t2_seconds, t1_seconds) / (60 * 60 * 24 * 365.0));
-        }
-
-        std::cerr << "Unknown day count convention" << std::endl;
-        std::terminate();
-    }
-
-    PaymentSchedule schedule;
-    int start_date;
-    DayCountConvention convention;
 };
-
-auto yearly_rate_to_cts(double rate, int frequency) -> double
-{
-    if (frequency == 0)
-        return 0;
-
-    return frequency * std::log(1 + rate / frequency);
-}
-
-auto cts_rate_to_yearly(double cts_rate, int frequency) -> double
-{
-    if (frequency == 0)
-        return 0;
-
-    return frequency * (std::exp(cts_rate / frequency) - 1);
-}
 
 int main()
 {
     std::cout << std::setprecision(8) << std::fixed;
-    const std::map<int, Bond> bonds = {
-            {105759698, Bond(100, 3.6, 2, 15, 20190430, DayCountConvention::_30_360)},
-            {165237838, Bond(100, 4, 2, 10, 20240208, DayCountConvention::ACTUAL_ACTUAL)},
-            {168241282, Bond(100, 6.858, 2, 30, 20240501, DayCountConvention::_30_360)},
-            {168302533, Bond(100, 4.625, 2, 30, 20240515, DayCountConvention::ACTUAL_ACTUAL)},
-            {107424376, Bond(100, 3.75, 2, 30.5, 20190729, DayCountConvention::ACTUAL_ACTUAL)},
-            {0, Bond(100, 2.4, 2, 10, 20160808, DayCountConvention::_30_360)}
+    /*const std::map<int, BondOld> bonds = {
+            {105759698, BondOld(100, 3.6, 2, 15, 20190430, DayCountConvention::_30_360)},
+            {165237838, BondOld(100, 4, 2, 10, 20240208, DayCountConvention::ACTUAL_ACTUAL)},
+            {168241282, BondOld(100, 6.858, 2, 30, 20240501, DayCountConvention::_30_360)},
+            {168302533, BondOld(100, 4.625, 2, 30, 20240515, DayCountConvention::ACTUAL_ACTUAL)},
+            {107424376, BondOld(100, 3.75, 2, 30.5, 20190729, DayCountConvention::ACTUAL_ACTUAL)},
+            {0,         BondOld(100, 2.4, 2, 10, 20160808, DayCountConvention::_30_360)}
+    };*/
+
+    const auto bond = Bond{
+        .principal = 100,
+        .yearly_coupon = 3.6,
+        .n_years = 15,
+        .start_date = 20190430,
+        .frequency = 2,
+        .convention = DayCountConvention::_30_360
     };
 
-    const auto date = 20241101;
-    const auto bond = bonds.at(168241282);
-    const auto ref_bond = bonds.at(168302533);
-    const auto bond_price = 107.056;
-    const auto ref_price = 105.515625;
+    const auto date = 20241206;
+    const auto price = 107;
 
-    auto bond_yield = cts_rate_to_yearly(bond.get_cts_yield(date, bond_price), 2);
-    auto ref_yield = cts_rate_to_yearly(ref_bond.get_cts_yield(date, ref_price), 2);
-    std::cout << "Bond Yield: " << bond_yield * 100 << "%" << std::endl;
-    std::cout << "Ref Yield: " << ref_yield * 100 << "%" << std::endl;
-    std::cout << "Spread: " << (bond_yield - ref_yield) * 10000 << "bps" << std::endl;
+    std::cout << "Price: " << price << std::endl;
+    std::cout << "YTM: \t\t\t" << bond.get_yield(date, price).get_yearly_rate(bond.frequency) * 100 << std::endl;
+    std::cout << "Yield: \t\t\t" << bond.get_yield(bond.start_date, price).get_yearly_rate(bond.frequency) * 100 << std::endl;
+    std::cout << "Current Yield: \t" << (bond.yearly_coupon / price) * 100 << std::endl;
 
     return 0;
 }
