@@ -278,14 +278,6 @@ public:
 int main()
 {
     std::cout << std::setprecision(8) << std::fixed;
-    /*const std::map<int, BondOld> bonds = {
-            {105759698, BondOld(100, 3.6, 2, 15, 20190430, DayCountConvention::_30_360)},
-            {165237838, BondOld(100, 4, 2, 10, 20240208, DayCountConvention::ACTUAL_ACTUAL)},
-            {168241282, BondOld(100, 6.858, 2, 30, 20240501, DayCountConvention::_30_360)},
-            {168302533, BondOld(100, 4.625, 2, 30, 20240515, DayCountConvention::ACTUAL_ACTUAL)},
-            {107424376, BondOld(100, 3.75, 2, 30.5, 20190729, DayCountConvention::ACTUAL_ACTUAL)},
-            {0,         BondOld(100, 2.4, 2, 10, 20160808, DayCountConvention::_30_360)}
-    };*/
 
     const auto bond = Bond{
         .principal = 100,
@@ -300,8 +292,7 @@ int main()
     const auto price = 107;
 
     std::cout << "Price: " << price << std::endl;
-    std::cout << "YTM: \t\t\t" << bond.get_yield(date, price).get_yearly_rate(bond.frequency) * 100 << std::endl;
-    std::cout << "Yield: \t\t\t" << bond.get_yield(bond.start_date, price).get_yearly_rate(bond.frequency) * 100 << std::endl;
+    std::cout << "Yield: \t\t\t" << bond.get_yield(date, price).get_yearly_rate(bond.frequency) * 100 << std::endl;
     std::cout << "Current Yield: \t" << (bond.yearly_coupon / price) * 100 << std::endl;
 
     return 0;
